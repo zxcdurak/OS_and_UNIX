@@ -95,10 +95,6 @@ void* provider(void* arg){
 }
 
 int main(void) {
-    // struct event* e = create_event(121);
-    // printf("event id = %d\n", e->id);
-    // printf("event id = %s\n", e->text);
-    // event_destroy(e);
     pthread_t tid_prov, tid_cons;
     int rc = pthread_create(&tid_prov, NULL, provider, &mon);
     if (rc != 0) {fprintf(stderr, "pthread_create: %s\n", strerror(rc)); return 1;}
