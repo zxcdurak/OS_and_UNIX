@@ -161,10 +161,10 @@ int main(void) {
             continue;                  
         }
 
-        if (FD_ISSET(server_fd, &rfds))
-            handle_new_connection(server_fd, &client_fd);
         if (client_fd != -1 && FD_ISSET(client_fd, &rfds))
             handle_client_data(&client_fd);
+        if (FD_ISSET(server_fd, &rfds))
+            handle_new_connection(server_fd, &client_fd);
     }
 
     printf("Завершение работы\n");
