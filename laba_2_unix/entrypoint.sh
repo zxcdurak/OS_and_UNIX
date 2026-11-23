@@ -11,10 +11,14 @@ exec 9>>.lock
 CONTAINER_ID=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 
 current_file=""
+sleep_pid=""
 seq_num=0
 stopping=0
 
 cleanup() {
+    if [ -n "$sleep_pid" ]; then
+        kill "$sleep_pid" 2>/dev/null || true
+    fi
     flock -u 9 2>/dev/null || true
     if [ -n "$current_file" ]; then
         rm -f "./$current_file"
@@ -22,7 +26,21 @@ cleanup() {
     fi
 }
 
-trap stopping=1 TERM INT
+on_stop() {
+    stopping=1
+    if [ -n "$sleep_pid" ]; then
+        kill "$sleep_pid" 2>/dev/null || true
+    fi
+}
+
+interruptible_sleep() {
+    sleep "$1" &
+    sleep_pid=$!
+    wait "$sleep_pid" 2>/dev/null || true
+    sleep_pid=""
+}
+
+trap on_stop TERM INT
 trap cleanup EXIT
 
 while [ "$stopping" -eq 0 ]; do
@@ -37,9 +55,11 @@ while [ "$stopping" -eq 0 ]; do
             *)  name="$i" ;;
         esac
         if [ ! -e "$name" ]; then
-            printf '%s %d\n' "$CONTAINER_ID" "$seq_num" > "$name"
-            current_file="$name"
-            break
+            if : > "$name"; then
+                current_file="$name"
+                printf '%s %d\n' "$CONTAINER_ID" "$seq_num" >| "$name"
+                break
+            fi
         fi
         i=$((i + 1))
     done
@@ -47,12 +67,12 @@ while [ "$stopping" -eq 0 ]; do
 
     echo "$CONTAINER_ID: created $current_file ($seq_num)"
     [ "$stopping" -eq 0 ] || break
-    sleep 1
+    interruptible_sleep 1
 
     rm -f "./$current_file"
     echo "$CONTAINER_ID: deleted $current_file"
     current_file=""
 
     [ "$stopping" -eq 0 ] || break
-    sleep 1
+    interruptible_sleep 1
 done
