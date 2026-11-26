@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
 #include <limits.h>
@@ -29,12 +30,23 @@ int hash_file(const char *path, unsigned char out[HLEN])
         return -1;
     }
 
-    unsigned char buf[65536];
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (ctx == NULL) {
+        close(fd);
+        errno = ENOMEM;
+        return -1;
+    }
+    if (EVP_DigestInit_ex(ctx, EVP_sha1(), NULL) != 1) {
+        EVP_MD_CTX_free(ctx);
+        close(fd);
+        errno = EIO;
+        return -1;
+    }
+
+    unsigned char buf[65536];
     unsigned int len = 0;
     ssize_t r;
 
-    EVP_DigestInit_ex(ctx, EVP_sha1(), NULL);
     while ((r = read(fd, buf, sizeof buf)) > 0) {
         EVP_DigestUpdate(ctx, buf, r);
     }
@@ -43,6 +55,28 @@ int hash_file(const char *path, unsigned char out[HLEN])
     int ok = (r == 0) && (EVP_DigestFinal_ex(ctx, out, &len) == 1);
     EVP_MD_CTX_free(ctx);
     return ok ? 0 : -1;
+}
+
+int copy_hash_of_same_inode(const struct stat *st, unsigned char out[HLEN])
+{
+    for (size_t i = 0; i < count; i++) {
+        if (files[i].dev == st->st_dev && files[i].ino == st->st_ino) {
+            memcpy(out, files[i].h, HLEN);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void free_files(void)
+{
+    for (size_t i = 0; i < count; i++) {
+        free(files[i].path);
+    }
+    free(files);
+    files = NULL;
+    count = 0;
+    capacity = 0;
 }
 
 int visit(const char *path, const struct stat *st, int flag, struct FTW *ftw)
@@ -54,14 +88,22 @@ int visit(const char *path, const struct stat *st, int flag, struct FTW *ftw)
     }
 
     File f;
-    f.path = strdup(path);
     f.dev = st->st_dev;
     f.ino = st->st_ino;
 
-    if (hash_file(path, f.h) < 0) {
+    int known = 0;
+    if (st->st_nlink > 1) {
+        known = copy_hash_of_same_inode(st, f.h);
+    }
+    if (!known && hash_file(path, f.h) < 0) {
         perror(path);
-        free(f.path);
         return 0;
+    }
+
+    f.path = strdup(path);
+    if (f.path == NULL) {
+        fprintf(stderr, "out of memory\n");
+        return 1;
     }
 
     for (int i = 0; i < HLEN; i++) {
@@ -70,8 +112,15 @@ int visit(const char *path, const struct stat *st, int flag, struct FTW *ftw)
     printf("  %s\n", path);
 
     if (count == capacity) {
-        capacity = capacity ? capacity * 2 : 128;
-        files = realloc(files, capacity * sizeof *files);
+        size_t new_capacity = capacity ? capacity * 2 : 128;
+        File *grown = realloc(files, new_capacity * sizeof *files);
+        if (grown == NULL) {
+            fprintf(stderr, "out of memory\n");
+            free(f.path);
+            return 1;
+        }
+        files = grown;
+        capacity = new_capacity;
     }
     files[count++] = f;
     return 0;
@@ -92,7 +141,11 @@ int compare(const void *a, const void *b)
 int replace_with_link(const char *orig, const char *dup)
 {
     char tmp[PATH_MAX + 16];
-    snprintf(tmp, sizeof tmp, "%s.linkstemp", dup);
+    int written = snprintf(tmp, sizeof tmp, "%s.linkstemp", dup);
+    if (written < 0 || (size_t)written >= sizeof tmp) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
 
     if (link(orig, tmp) < 0) {
         return -1;
@@ -111,17 +164,22 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (nftw(argv[1], visit, 32, FTW_PHYS) < 0) {
-        perror(argv[1]);
+    int rc = nftw(argv[1], visit, 32, FTW_PHYS);
+    if (rc != 0) {
+        if (rc < 0) {
+            perror(argv[1]);
+        }
+        free_files();
         return 1;
     }
 
-    qsort(files, count, sizeof *files, compare);
+    if (count > 1) {
+        qsort(files, count, sizeof *files, compare);
+    }
 
     int replaced = 0;
     size_t i = 0;
     while (i < count) {
-
         size_t j = i + 1;
         while (j < count && memcmp(files[i].h, files[j].h, HLEN) == 0) {
             j++;
@@ -146,5 +204,6 @@ int main(int argc, char **argv)
     }
 
     printf("replaced: %d\n", replaced);
+    free_files();
     return 0;
 }
