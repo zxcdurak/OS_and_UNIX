@@ -83,7 +83,7 @@ int visit(const char *path, const struct stat *st, int flag, struct FTW *ftw)
 {
     (void)ftw;
 
-    if (flag != FTW_F || !S_ISREG(st->st_mode)) {
+    if (flag != FTW_F) {
         return 0;
     }
 
